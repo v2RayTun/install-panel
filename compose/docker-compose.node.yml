@@ -1,0 +1,35 @@
+# Pull this image first: docker login docker-registry.v2raytun.com
+services:
+  v2raytunpanel-node:
+    image: ${REGISTRY:-docker-registry.v2raytun.com}/v2raytunpanel-node:${VERSION:-latest}
+    container_name: v2raytunpanel-node
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      PANEL_ADDRESS: ${PANEL_ADDRESS:?Set PANEL_ADDRESS in .env}
+      NODE_UUID: ${NODE_UUID:?Set NODE_UUID in .env}
+      CONNECTION_PORT: ${CONNECTION_PORT:-62050}
+      SERVICE_PORT: ${SERVICE_PORT:-62051}
+      NODE_PORT: ${CONNECTION_PORT:-62050}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      XRAY_STREAM_LOGS_TO_STDOUT: ${XRAY_STREAM_LOGS_TO_STDOUT:-true}
+    volumes:
+      - node_certs:/app/certs
+      - node_data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9999/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  node_certs:
+  node_data:
