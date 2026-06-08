@@ -16,8 +16,8 @@ SETUP_DIR="$(dirname "$SCRIPT_DIR")"
 [ -f "$SETUP_DIR/.config" ] && . "$SETUP_DIR/.config"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
-VERSION="${V2RAYTUN_VERSION:-1.0.10}"
-INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.10}"
+VERSION="${V2RAYTUN_VERSION:-1.0.13}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.13}"
 
 PANEL_DIR="/opt/v2raytunpanel"
 PANEL_DOCKER_DIR="$PANEL_DIR/docker"
@@ -101,6 +101,10 @@ panel_install() {
   local sub_domain="${V2RAYTUN_SUB_DOMAIN:-}"
 
   if [ -z "$panel_domain" ]; then
+    if [ ! -t 0 ]; then
+      error "V2RAYTUN_PANEL_DOMAIN is required in non-interactive mode"
+      return 1
+    fi
     while true; do
       read -rp "Panel domain (e.g. panel.example.com): " panel_domain
       if [ -z "$panel_domain" ]; then
@@ -113,7 +117,9 @@ panel_install() {
     done
   fi
   if [ -z "$sub_domain" ]; then
-    read -rp "Subscription page domain (Enter = same as panel): " sub_domain
+    if [ -t 0 ]; then
+      read -rp "Subscription page domain (Enter = same as panel): " sub_domain
+    fi
     sub_domain="${sub_domain:-$panel_domain}"
   fi
 
@@ -364,6 +370,59 @@ EOF
 # ──────────────────────────────────────────────────────────────────────────────
 # Node: install (interactive + paste-from-panel)
 # ──────────────────────────────────────────────────────────────────────────────
+ensure_awg_kernel_module() {
+  if lsmod 2>/dev/null | grep -q amneziawg; then
+    success "AmneziaWG kernel module already loaded"
+    return 0
+  fi
+
+  if modprobe amneziawg 2>/dev/null; then
+    success "AmneziaWG kernel module loaded"
+    return 0
+  fi
+
+  info "Installing AmneziaWG kernel module (amneziawg-dkms)..."
+
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y -qq linux-headers-"$(uname -r)" dkms 2>/dev/null || true
+
+    if ! dpkg -l amneziawg-dkms >/dev/null 2>&1; then
+      local awg_deb="/tmp/amneziawg-dkms.deb"
+      local kernel_ver
+      kernel_ver="$(uname -r)"
+      local arch
+      arch="$(dpkg --print-architecture)"
+
+      if curl -fsSL -o "$awg_deb" \
+        "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/releases/latest/download/amneziawg-dkms_1.0.0_${arch}.deb" 2>/dev/null; then
+        dpkg -i "$awg_deb" || apt-get install -f -y -qq
+        rm -f "$awg_deb"
+      else
+        warn "Could not download amneziawg-dkms package"
+        warn "You may need to install it manually: https://github.com/amnezia-vpn/amneziawg-linux-kernel-module"
+        return 1
+      fi
+    fi
+
+    if modprobe amneziawg 2>/dev/null; then
+      success "AmneziaWG kernel module installed and loaded"
+      return 0
+    fi
+
+    dkms autoinstall 2>/dev/null || true
+    modprobe amneziawg 2>/dev/null && {
+      success "AmneziaWG kernel module installed and loaded"
+      return 0
+    }
+  fi
+
+  warn "Could not load amneziawg kernel module"
+  warn "AWG nodes will not work without it. Please install manually."
+  warn "See: https://github.com/amnezia-vpn/amneziawg-linux-kernel-module"
+  return 1
+}
+
 node_install() {
   print_banner
   echo -e "${BOLD_MAGENTA}  Install Node${RESET}"
@@ -402,6 +461,11 @@ node_install_from_panel() {
     error "Empty input"
     rm -f docker-compose.yml
     return 1
+  fi
+
+  if grep -qi 'awg\|amneziawg\|wireguard' docker-compose.yml 2>/dev/null; then
+    info "AWG node detected — checking kernel module..."
+    ensure_awg_kernel_module || warn "Continuing without AWG kernel module..."
   fi
 
   info "Pulling node image..."

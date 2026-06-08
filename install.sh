@@ -4,7 +4,7 @@
 # ═════════════════════════════════════════════════════════════════════════════
 #
 # One-liner:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/v2RayTun/install-panel/main/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/PonomarevAleksandr/V2RayTunPanelSetup/main/install.sh)
 #
 # Optional environment overrides (no prompt):
 #   V2RAYTUN_REGISTRY        Docker registry hostname (default docker-registry.v2raytun.com)
@@ -12,18 +12,18 @@
 #   V2RAYTUN_ACTION          Direct action: install-panel | install-node | update-panel | update-node
 #   V2RAYTUN_PANEL_DOMAIN    Pre-fill panel domain (skips prompt)
 #   V2RAYTUN_SUB_DOMAIN      Pre-fill subscription domain (defaults to panel domain)
-#   V2RAYTUNSETUP_REPO       Source for helper scripts (default v2RayTun/install-panel)
+#   V2RAYTUNSETUP_REPO       Source for helper scripts (default PonomarevAleksandr/V2RayTunPanelSetup)
 #   V2RAYTUNSETUP_BRANCH     Branch (default main)
 #
 # ═════════════════════════════════════════════════════════════════════════════
 
 set -e
 
-INSTALLER_VERSION="1.0.10"
+INSTALLER_VERSION="1.0.13"
 DEFAULT_REGISTRY="docker-registry.v2raytun.com"
-DEFAULT_VERSION="1.0.10"
+DEFAULT_VERSION="1.0.13"
 
-REPO="${V2RAYTUNSETUP_REPO:-v2RayTun/install-panel}"
+REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 SETUP_DIR="/opt/v2raytunpanel-setup"
@@ -178,7 +178,7 @@ SETUP_DIR="/opt/v2raytunpanel-setup"
 
 if [ ! -f "$SETUP_DIR/lib/v2raytunsetup.sh" ]; then
   echo "v2raytunsetup is not installed. Re-run installer:"
-  echo "  bash <(curl -fsSL https://raw.githubusercontent.com/v2RayTun/install-panel/main/install.sh)"
+  echo "  bash <(curl -fsSL https://raw.githubusercontent.com/PonomarevAleksandr/V2RayTunPanelSetup/main/install.sh)"
   exit 1
 fi
 
