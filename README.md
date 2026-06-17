@@ -17,7 +17,7 @@ Everything else is automated:
 - Configures Caddy reverse proxy with automatic Let's Encrypt SSL
 - Runs inside a `tmux` session so SSH disconnects don't break the install
 
-After install, open `https://your-domain/register` and create the first admin account.
+After install, open `https://your-domain/auth/login` and create the first admin account.
 
 ---
 
