@@ -21,7 +21,7 @@ set -e
 
 INSTALLER_VERSION="1.0.13"
 DEFAULT_REGISTRY="docker-registry.v2raytun.com"
-DEFAULT_VERSION="1.0.13"
+DEFAULT_VERSION="1.0.40"
 
 REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
