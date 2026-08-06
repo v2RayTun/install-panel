@@ -27,6 +27,14 @@ REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 SETUP_DIR="/opt/v2raytunpanel-setup"
+
+# Directory this script was run from. When the repo is cloned (deploy-key flow),
+# the helper assets sit next to it and are used directly instead of being
+# downloaded — required now that the repo is private.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo '')"
+
+# Token for private-repo access via the GitHub API (either name works).
+GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 TMUX_SESSION="v2raytunpanel-setup"
 
 RESET='\033[0m'
@@ -151,10 +159,37 @@ fetch_assets() {
     "compose/docker-compose.node.yml"
   )
 
+  # The repo is private, so plain raw.githubusercontent URLs return 404.
+  # Three sources, in order:
+  #   1. a local checkout (installer run from `git clone` — deploy-key flow)
+  #   2. the GitHub API with a token (GH_TOKEN/GITHUB_TOKEN) — works on private repos
+  #   3. plain raw (only if the repo is ever made public again)
+  local from_local=0
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib/common.sh" ] && [ -f "$SCRIPT_DIR/compose/docker-compose.panel.yml" ]; then
+    from_local=1
+    info "Using helper scripts from local checkout ($SCRIPT_DIR)"
+  elif [ -n "$GH_TOKEN" ]; then
+    info "Fetching helper scripts via GitHub API (token auth)"
+  fi
+
   for f in "${files[@]}"; do
-    if ! curl -fsSL "${RAW_BASE}/${f}" -o "${SETUP_DIR}/${f}"; then
+    if [ "$from_local" -eq 1 ] && [ -f "$SCRIPT_DIR/$f" ]; then
+      cp "$SCRIPT_DIR/$f" "${SETUP_DIR}/${f}"
+    elif [ -n "$GH_TOKEN" ]; then
+      if ! curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+                 -H "Accept: application/vnd.github.raw" \
+                 "https://api.github.com/repos/${REPO}/contents/${f}?ref=${BRANCH}" \
+                 -o "${SETUP_DIR}/${f}"; then
+        error "Failed to fetch ${f} via GitHub API — is the token valid and does it have read access to ${REPO}?"
+        exit 1
+      fi
+    elif ! curl -fsSL "${RAW_BASE}/${f}" -o "${SETUP_DIR}/${f}"; then
       error "Failed to fetch ${f}"
       echo "URL: ${RAW_BASE}/${f}"
+      echo
+      echo "This repo is PRIVATE. Use one of:"
+      echo "  - a token:  GH_TOKEN=<your_token> bash install.sh"
+      echo "  - a clone:  git clone git@github.com:${REPO}.git && cd install-panel && bash install.sh"
       exit 1
     fi
   done
