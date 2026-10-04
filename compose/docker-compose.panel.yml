@@ -50,7 +50,9 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # Wait for the server's own cookie: run as root before it exists, the CLI writes
+      # /var/lib/rabbitmq/.erlang.cookie as root 0400 and the server (uid 100) dies with eacces.
+      test: ["CMD-SHELL", "[ -f /var/lib/rabbitmq/.erlang.cookie ] && rabbitmq-diagnostics -q ping"]
       interval: 30s
       timeout: 10s
       retries: 5
