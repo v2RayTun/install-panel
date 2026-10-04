@@ -625,7 +625,15 @@ node_update() {
   check_docker
 
   cd "$NODE_DIR"
-  info "Pulling latest image..."
+
+  # The compose comes from the panel with the node image pinned to the panel's version at that
+  # time; without rewriting the tag, "Update Node" re-pulls the same old image.
+  if grep -qE "v2raytunpanel-node:[^[:space:]\"']+" docker-compose.yml; then
+    info "Setting node image to ${VERSION}..."
+    sed -i -E "s#(v2raytunpanel-node:)[^[:space:]\"']+#\1${VERSION}#" docker-compose.yml
+  fi
+
+  info "Pulling image (${VERSION})..."
   docker compose pull
 
   info "Restarting node..."
