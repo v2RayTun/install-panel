@@ -859,10 +859,10 @@ main() {
       if [ ! -t 0 ] || [ ! -t 1 ]; then _interactive=0; fi
 
       case "${V2RAYTUN_ACTION:-}" in
-        install-panel) panel_install; [ "$_interactive" = 1 ] && { press_any_key; menu_main; } ;;
-        install-node)  node_install;  [ "$_interactive" = 1 ] && { press_any_key; menu_main; } ;;
-        update-panel)  panel_update;  [ "$_interactive" = 1 ] && { press_any_key; menu_main; } ;;
-        update-node)   node_update;   [ "$_interactive" = 1 ] && { press_any_key; menu_main; } ;;
+        install-panel) panel_install; if [ "$_interactive" = 1 ]; then press_any_key; menu_main; fi ;;
+        install-node)  node_install; if [ "$_interactive" = 1 ]; then press_any_key; menu_main; fi ;;
+        update-panel)  panel_update; if [ "$_interactive" = 1 ]; then press_any_key; menu_main; fi ;;
+        update-node)   node_update; if [ "$_interactive" = 1 ]; then press_any_key; menu_main; fi ;;
         "")            [ "$_interactive" = 1 ] && menu_main || menu_help ;;
         *)             error "Unknown V2RAYTUN_ACTION: $V2RAYTUN_ACTION"; exit 1 ;;
       esac
