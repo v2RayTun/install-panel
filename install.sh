@@ -8,7 +8,8 @@
 #
 # Optional environment overrides (no prompt):
 #   V2RAYTUN_REGISTRY        Docker registry hostname (default docker-registry.v2raytun.com)
-#   V2RAYTUN_VERSION         Image tag to pull (default 1.0.10)
+#   V2RAYTUN_VERSION         Image tag to pull (default: DEFAULT_VERSION below)
+#   V2RAYTUN_PANEL_IP        Node install: the panel's IP, the only one the agent port answers
 #   V2RAYTUN_ACTION          Direct action: install-panel | install-node | update-panel | update-node
 #   V2RAYTUN_PANEL_DOMAIN    Pre-fill panel domain (skips prompt)
 #   V2RAYTUN_SUB_DOMAIN      Pre-fill subscription domain (defaults to panel domain)
@@ -19,9 +20,9 @@
 
 set -e
 
-INSTALLER_VERSION="1.0.53"
+INSTALLER_VERSION="1.0.56"
 DEFAULT_REGISTRY="docker-registry.v2raytun.com"
-DEFAULT_VERSION="1.0.53"
+DEFAULT_VERSION="1.0.56"
 
 REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
