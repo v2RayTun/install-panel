@@ -272,7 +272,10 @@ panel_update() {
   # stay at whatever was written at install time, so "Update Panel" would just
   # re-pull the same old version and freshly-created nodes would keep pinning an
   # outdated node image.
+  local env_before=""
   if [ -f "$PANEL_DOCKER_DIR/.env" ]; then
+    env_before="$PANEL_DOCKER_DIR/.env.before-update"
+    cp -p "$PANEL_DOCKER_DIR/.env" "$env_before"
     info "Setting version to ${VERSION}..."
     sed -i "s|^VERSION=.*|VERSION=${VERSION}|" "$PANEL_DOCKER_DIR/.env"
     sed -i "s|^NODE_DOCKER_IMAGE=.*|NODE_DOCKER_IMAGE=${REGISTRY}/v2raytunpanel-node:${VERSION}|" "$PANEL_DOCKER_DIR/.env"
@@ -304,8 +307,11 @@ panel_update() {
   info "Pulling images (${VERSION})..."
   docker compose pull || {
     error "docker compose pull failed"
+    # Nothing was restarted: put the versions back, or the next start would ask for images that are not here.
+    [ -z "$env_before" ] || { mv -f "$env_before" "$PANEL_DOCKER_DIR/.env" && info "The versions in .env are back to the running ones"; }
     return 1
   }
+  [ -z "$env_before" ] || rm -f "$env_before"
 
   info "Restarting services with the new images..."
   docker compose up -d || {
