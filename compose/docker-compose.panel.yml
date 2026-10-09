@@ -99,8 +99,12 @@ services:
       NODE_DOCKER_IMAGE: ${NODE_DOCKER_IMAGE:-}
       SUBSCRIPTION_PAGE_URL: ${SUBSCRIPTION_PAGE_URL:-/sub}
       BACKUP_LOCAL_PATH: /app/backups
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
+      UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-https://v2.run/latest.json}
     volumes:
       - backups_data:/app/backups
+      # The panel's «Обновить» button leaves its request here for the updater on this host.
+      - ./update:/app/update
     ports:
       - "127.0.0.1:${BACKEND_PORT:-3000}:3000"
     depends_on:

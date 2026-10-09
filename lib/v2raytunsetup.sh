@@ -13,7 +13,11 @@ SETUP_DIR="$(dirname "$SCRIPT_DIR")"
 
 . "$SCRIPT_DIR/common.sh"
 
+# .config keeps the version the installer was fetched for; a V2RAYTUN_VERSION given to this run
+# (the panel's «Обновить» button passes the new one) wins over it.
+_requested_version="${V2RAYTUN_VERSION:-}"
 [ -f "$SETUP_DIR/.config" ] && . "$SETUP_DIR/.config"
+[ -n "$_requested_version" ] && V2RAYTUN_VERSION="$_requested_version"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
 VERSION="${V2RAYTUN_VERSION:-1.0.58}"
@@ -160,6 +164,7 @@ EOF
 
   cp "$SETUP_DIR/compose/docker-compose.panel.yml" "$PANEL_DOCKER_DIR/docker-compose.yml"
   success "Configuration saved at ${PANEL_DOCKER_DIR}"
+  updater_install || warn "The updater could not be set up: the panel will show the update command instead of the «Обновить» button"
 
   info "Pulling images (this may take a few minutes)..."
   (cd "$PANEL_DOCKER_DIR" && docker compose pull) || {
@@ -293,6 +298,8 @@ panel_update() {
     cp "$SETUP_DIR/compose/docker-compose.panel.yml" docker-compose.yml
     info "docker-compose.yml brought to the current template (the previous one: docker-compose.yml.bak-$ts)"
   fi
+  # Before the backend is recreated: its update folder has to exist, owned by the backend user.
+  updater_install || warn "The updater could not be set up: the panel will show the update command instead of the «Обновить» button"
 
   info "Pulling images (${VERSION})..."
   docker compose pull || {
@@ -393,6 +400,229 @@ restrict_agent_port() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Panel: one-click update from the panel
+# ──────────────────────────────────────────────────────────────────────────────
+# The backend container cannot replace itself. Its «Обновить» button leaves a request in a
+# folder it shares with this host (docker/update ↔ /app/update); a systemd path unit starts
+# the updater, which runs this installer's «Update Panel» for the requested version.
+UPDATE_DIR="$PANEL_DOCKER_DIR/update"
+UPDATER_BIN="/usr/local/lib/v2raytunpanel/panel-updater"
+UPDATER_UNIT="v2raytunpanel-updater"
+# The backend runs as the image's «node» user.
+BACKEND_UID=1000
+
+has_systemd() {
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+# Writes the updater. It takes nothing from the request but a version of the form X.Y.Z, and it
+# writes into the shared folder only through files renamed into place, so a link left there is
+# replaced instead of followed.
+updater_script() {
+  cat << 'UPDATER'
+#!/bin/bash
+# V2RayTun Panel host updater, installed by v2raytunsetup.
+# systemd runs it when the panel leaves a request (v2raytunpanel-updater.path) and at boot.
+# `panel-updater heartbeat` only tells the panel that the updater is in place.
+set -u
+umask 022
+
+UPDATE_DIR="${V2RAYTUN_UPDATE_DIR:-/opt/v2raytunpanel/docker/update}"
+SETUP_CMD="${V2RAYTUN_SETUP_CMD:-/usr/local/bin/v2raytunsetup}"
+ENV_FILE="${V2RAYTUN_PANEL_ENV:-/opt/v2raytunpanel/docker/.env}"
+RUN_LOG="${V2RAYTUN_UPDATE_LOG:-/var/log/v2raytunpanel-update.log}"
+LOCK_FILE="${V2RAYTUN_UPDATE_LOCK:-/run/v2raytunpanel-updater.lock}"
+RUN_TIMEOUT="${V2RAYTUN_UPDATE_TIMEOUT:-1800}"
+INSTALLER_VERSION="${V2RAYTUN_INSTALLER_VERSION:-}"
+LOG_LINES=40
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+REQUEST="$UPDATE_DIR/request"
+STATUS="$UPDATE_DIR/status.json"
+HEARTBEAT="$UPDATE_DIR/updater.json"
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# stdin into $1 through a temp file renamed over it.
+put() {
+  local tmp
+  tmp=$(mktemp "$UPDATE_DIR/.updater.XXXXXX") || return 1
+  if cat > "$tmp" && chmod 644 "$tmp" && mv -fT "$tmp" "$1"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+heartbeat() {
+  local version="unknown"
+  [[ "$INSTALLER_VERSION" =~ $VERSION_RE ]] && version="$INSTALLER_VERSION"
+  printf '{"installed":true,"installerVersion":"%s","writtenAt":"%s"}\n' "$version" "$(now)" | put "$HEARTBEAT"
+}
+
+# The last lines of the run as a JSON array: colours out, the panel's secrets and any
+# credentials in URLs or NAME=value pairs masked.
+log_tail_json() {
+  tail -n "$LOG_LINES" "$RUN_LOG" 2>/dev/null | LC_ALL=C awk -v envfile="$ENV_FILE" '
+    BEGIN {
+      esc = sprintf("%c", 27)
+      ctl = "[" sprintf("%c", 1) "-" sprintf("%c", 9) sprintf("%c", 11) "-" sprintf("%c", 31) sprintf("%c", 127) "]"
+      n = 0
+      while ((getline row < envfile) > 0) {
+        eq = index(row, "=")
+        if (eq < 2) continue
+        val = substr(row, eq + 1)
+        if (toupper(substr(row, 1, eq - 1)) ~ /(PASS|SECRET|TOKEN|KEY)/ && length(val) >= 4) secret[++n] = val
+      }
+      printf "["
+    }
+    function literal(s, needle,   out, i) {
+      out = ""
+      while ((i = index(s, needle)) > 0) {
+        out = out substr(s, 1, i - 1) "***"
+        s = substr(s, i + length(needle))
+      }
+      return out s
+    }
+    function pairs(s,   out) {
+      out = ""
+      while (match(s, /(PASSWORD|PASSWD|SECRET|TOKEN|password|passwd|secret|token)[A-Za-z_]*[=:][ ]*/)) {
+        out = out substr(s, 1, RSTART + RLENGTH - 1) "***"
+        s = substr(s, RSTART + RLENGTH)
+        if (match(s, /^[^ ]+/)) s = substr(s, RLENGTH + 1)
+      }
+      return out s
+    }
+    {
+      line = $0
+      gsub(esc "\\[[0-9;?]*[A-Za-z]", "", line)
+      gsub(ctl, " ", line)
+      for (j = 1; j <= n; j++) line = literal(line, secret[j])
+      line = pairs(line)
+      gsub(/:\/\/[^\/@ ]+@/, "://***@", line)
+      gsub(/[\\"]/, "\\\\&", line)
+      printf "%s\"%s\"", (NR > 1 ? "," : ""), line
+    }
+    END { printf "]" }'
+}
+
+# state version startedAt [finishedAt exitCode]
+write_status() {
+  local finished=""
+  [ -n "${4:-}" ] && finished=",\"finishedAt\":\"$4\",\"exitCode\":$5"
+  printf '{"state":"%s","version":"%s","startedAt":"%s"%s,"log":%s}\n' "$1" "$2" "$3" "$finished" "$(log_tail_json)" | put "$STATUS"
+}
+
+run_request() {
+  [ -e "$REQUEST" ] || [ -L "$REQUEST" ] || return 0
+  local version="" started code=0
+  if [ -f "$REQUEST" ] && [ ! -L "$REQUEST" ]; then
+    version=$(head -c 64 "$REQUEST" | head -n 1 | tr -d '[:space:]')
+  fi
+  started=$(now)
+  : > "$RUN_LOG" && chmod 600 "$RUN_LOG"
+
+  # Each status is written before the request goes, so the panel never reads the last run's
+  # ending in between and takes it for this one.
+  if [[ ! "$version" =~ $VERSION_RE ]]; then
+    echo "[ERROR] The request does not name a version of the form X.Y.Z; nothing was run." >> "$RUN_LOG"
+    write_status failed "" "$started" "$(now)" 2
+    rm -f "$REQUEST"
+    return 2
+  fi
+  if [ ! -x "$SETUP_CMD" ]; then
+    echo "[ERROR] $SETUP_CMD is missing: run the installer once by hand." >> "$RUN_LOG"
+    write_status failed "$version" "$started" "$(now)" 127
+    rm -f "$REQUEST"
+    return 127
+  fi
+
+  write_status queued "$version" "$started"
+  rm -f "$REQUEST"
+  exec 9> "$LOCK_FILE"
+  flock 9
+  write_status running "$version" "$started"
+  timeout "$RUN_TIMEOUT" env V2RAYTUN_ACTION=update-panel V2RAYTUN_VERSION="$version" "$SETUP_CMD" < /dev/null >> "$RUN_LOG" 2>&1 || code=$?
+  [ "$code" = 124 ] && echo "[ERROR] The update did not finish in ${RUN_TIMEOUT} s and was stopped." >> "$RUN_LOG"
+  if [ "$code" = 0 ]; then
+    write_status "done" "$version" "$started" "$(now)" 0
+  else
+    write_status failed "$version" "$started" "$(now)" "$code"
+  fi
+  return "$code"
+}
+
+[ -d "$UPDATE_DIR" ] || exit 0
+heartbeat || echo "panel-updater: cannot write $HEARTBEAT" >&2
+[ "${1:-}" = "heartbeat" ] && exit 0
+run_request
+UPDATER
+}
+
+# Sets up (or refreshes) the updater: on install and on every «Update Panel», so panels installed
+# before it get it with one manual update. Without systemd the panel shows the command instead.
+updater_install() {
+  mkdir -p "$UPDATE_DIR"
+  chown "$BACKEND_UID:$BACKEND_UID" "$UPDATE_DIR"
+  chmod 750 "$UPDATE_DIR"
+  if ! has_systemd; then
+    warn "No systemd on this server: the panel will show the update command instead of the «Обновить» button"
+    return 0
+  fi
+  mkdir -p "$(dirname "$UPDATER_BIN")"
+  # A new file renamed into place: an update started by the updater keeps reading its own copy.
+  updater_script > "$UPDATER_BIN.new" && chmod 755 "$UPDATER_BIN.new" && mv -f "$UPDATER_BIN.new" "$UPDATER_BIN"
+
+  cat > "/etc/systemd/system/$UPDATER_UNIT.path" << EOF
+[Unit]
+Description=V2RayTun Panel: wait for an update request from the panel
+
+[Path]
+PathExists=$UPDATE_DIR/request
+Unit=$UPDATER_UNIT.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "/etc/systemd/system/$UPDATER_UNIT.service" << EOF
+[Unit]
+Description=V2RayTun Panel: update the panel when it asks
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=V2RAYTUN_INSTALLER_VERSION=$INSTALLER_VERSION
+ExecStart=$UPDATER_BIN
+TimeoutStartSec=40min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Never `systemctl start` the service here: «Update Panel» may be running inside it.
+  if systemctl daemon-reload \
+    && systemctl enable "$UPDATER_UNIT.service" >/dev/null 2>&1 \
+    && systemctl enable --now "$UPDATER_UNIT.path" >/dev/null 2>&1; then
+    V2RAYTUN_INSTALLER_VERSION="$INSTALLER_VERSION" "$UPDATER_BIN" heartbeat
+    success "One-click update from the panel is set up ($UPDATER_UNIT.path)"
+  else
+    warn "Could not enable $UPDATER_UNIT.path: the panel will show the update command instead of the «Обновить» button"
+  fi
+}
+
+updater_remove() {
+  if has_systemd; then
+    systemctl disable --now "$UPDATER_UNIT.path" >/dev/null 2>&1 || true
+    systemctl disable "$UPDATER_UNIT.service" >/dev/null 2>&1 || true
+  fi
+  rm -f "/etc/systemd/system/$UPDATER_UNIT.path" "/etc/systemd/system/$UPDATER_UNIT.service" "$UPDATER_BIN"
+  rmdir "$(dirname "$UPDATER_BIN")" 2>/dev/null || true
+  has_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Panel: status / logs / remove
 # ──────────────────────────────────────────────────────────────────────────────
 panel_status() {
@@ -437,6 +667,7 @@ panel_remove() {
   fi
   (cd "$PANEL_DOCKER_DIR" && docker compose down -v --remove-orphans) || true
   [ -f "$CADDY_DIR/docker-compose.yml" ] && (cd "$CADDY_DIR" && docker compose down -v) || true
+  updater_remove
   rm -rf "$PANEL_DIR"
   success "Panel removed"
 }
@@ -1353,6 +1584,12 @@ Environment:
   V2RAYTUN_REGISTRY        Docker registry hostname
   V2RAYTUN_VERSION         Image tag (default ${VERSION})
   V2RAYTUN_PANEL_IP        Node install: the panel's IP, the only one the agent port answers (when ufw is active)
+
+Updating from the panel:
+  Install and «Update Panel» set up a host updater (systemd: ${UPDATER_UNIT}.path and .service).
+  The panel's «Обновить» button leaves the new version in ${UPDATE_DIR}, and the updater runs
+  «Update Panel» for it. Log of the last run: /var/log/v2raytunpanel-update.log.
+  «Remove Panel» removes the updater too.
 HELP
 }
 
