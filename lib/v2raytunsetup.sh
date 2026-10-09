@@ -429,6 +429,8 @@ umask 022
 
 UPDATE_DIR="${V2RAYTUN_UPDATE_DIR:-/opt/v2raytunpanel/docker/update}"
 SETUP_CMD="${V2RAYTUN_SETUP_CMD:-/usr/local/bin/v2raytunsetup}"
+SETUP_CONFIG="${V2RAYTUN_SETUP_CONFIG:-/opt/v2raytunpanel-setup/.config}"
+BACKEND_CONTAINER="${V2RAYTUN_BACKEND_CONTAINER:-v2raytunpanel-backend}"
 ENV_FILE="${V2RAYTUN_PANEL_ENV:-/opt/v2raytunpanel/docker/.env}"
 RUN_LOG="${V2RAYTUN_UPDATE_LOG:-/var/log/v2raytunpanel-update.log}"
 LOCK_FILE="${V2RAYTUN_UPDATE_LOCK:-/run/v2raytunpanel-updater.lock}"
@@ -513,9 +515,73 @@ write_status() {
   printf '{"state":"%s","version":"%s","startedAt":"%s"%s,"log":%s}\n' "$1" "$2" "$3" "$finished" "$(log_tail_json)" | put "$STATUS"
 }
 
+# The release the panel runs now, from its image tag; empty when that cannot be told.
+running_version() {
+  local image
+  image=$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null) || return 0
+  echo "${image##*:}"
+}
+
+# Whether X.Y.Z $1 is newer than X.Y.Z $2.
+newer_than() {
+  local -a a b
+  local i
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    ((10#${a[i]} > 10#${b[i]})) && return 0
+    ((10#${a[i]} < 10#${b[i]})) && return 1
+  done
+  return 1
+}
+
+# install.sh of the source this panel was installed from (RAW_BASE in the installer's .config),
+# fetched now: the update then brings the new release's compose template and installer fixes,
+# as the one-liner does. Prints the path of the copy, or fails.
+fresh_installer() {
+  local raw dir
+  raw=$(sed -n 's|^RAW_BASE="\(https://[^"]*\)"$|\1|p' "$SETUP_CONFIG" 2>/dev/null | head -n 1)
+  [ -n "$raw" ] || return 1
+  dir=$(mktemp -d) || return 1
+  if curl -fsSL --max-time 60 "$raw/install.sh" -o "$dir/install.sh" && bash -n "$dir/install.sh"; then
+    echo "$dir/install.sh"
+    return 0
+  fi
+  rm -rf "$dir"
+  return 1
+}
+
+# Runs «Update Panel» for $1: with the installer fetched now, or the one on this server when the
+# fetch fails.
+run_update() {
+  local version="$1" fresh="" raw rest code=0
+  if fresh=$(fresh_installer); then
+    raw=$(sed -n 's|^RAW_BASE="\(https://[^"]*\)"$|\1|p' "$SETUP_CONFIG" | head -n 1)
+    rest="${raw#https://raw.githubusercontent.com/}"
+    echo "[INFO] Updating with the installer fetched just now from $raw" >> "$RUN_LOG"
+    if [ "$rest" != "$raw" ] && [ "${rest%/*}" != "$rest" ]; then
+      # The fresh install.sh fetches its scripts from the same repository and branch.
+      timeout "$RUN_TIMEOUT" env V2RAYTUN_ACTION=update-panel V2RAYTUN_VERSION="$version" \
+        V2RAYTUNSETUP_REPO="${rest%/*}" V2RAYTUNSETUP_BRANCH="${rest##*/}" \
+        bash "$fresh" < /dev/null >> "$RUN_LOG" 2>&1 || code=$?
+    else
+      timeout "$RUN_TIMEOUT" env V2RAYTUN_ACTION=update-panel V2RAYTUN_VERSION="$version" \
+        bash "$fresh" < /dev/null >> "$RUN_LOG" 2>&1 || code=$?
+    fi
+    rm -rf "$(dirname "$fresh")"
+  elif [ -x "$SETUP_CMD" ]; then
+    echo "[WARN] Could not fetch the installer: updating with the one on this server" >> "$RUN_LOG"
+    timeout "$RUN_TIMEOUT" env V2RAYTUN_ACTION=update-panel V2RAYTUN_VERSION="$version" "$SETUP_CMD" < /dev/null >> "$RUN_LOG" 2>&1 || code=$?
+  else
+    echo "[ERROR] Could not fetch the installer and $SETUP_CMD is missing: run the installer once by hand." >> "$RUN_LOG"
+    code=127
+  fi
+  return "$code"
+}
+
 run_request() {
   [ -e "$REQUEST" ] || [ -L "$REQUEST" ] || return 0
-  local version="" started code=0
+  local version="" started current code=0
   if [ -f "$REQUEST" ] && [ ! -L "$REQUEST" ]; then
     version=$(head -c 64 "$REQUEST" | head -n 1 | tr -d '[:space:]')
   fi
@@ -530,11 +596,13 @@ run_request() {
     rm -f "$REQUEST"
     return 2
   fi
-  if [ ! -x "$SETUP_CMD" ]; then
-    echo "[ERROR] $SETUP_CMD is missing: run the installer once by hand." >> "$RUN_LOG"
-    write_status failed "$version" "$started" "$(now)" 127
+  # Only forward: an older release may not start on the newer database.
+  current=$(running_version)
+  if [[ "$current" =~ $VERSION_RE ]] && ! newer_than "$version" "$current"; then
+    echo "[ERROR] The panel runs $current already; the updater only moves it to a newer release." >> "$RUN_LOG"
+    write_status failed "$version" "$started" "$(now)" 3
     rm -f "$REQUEST"
-    return 127
+    return 3
   fi
 
   write_status queued "$version" "$started"
@@ -542,7 +610,7 @@ run_request() {
   exec 9> "$LOCK_FILE"
   flock 9
   write_status running "$version" "$started"
-  timeout "$RUN_TIMEOUT" env V2RAYTUN_ACTION=update-panel V2RAYTUN_VERSION="$version" "$SETUP_CMD" < /dev/null >> "$RUN_LOG" 2>&1 || code=$?
+  run_update "$version" || code=$?
   [ "$code" = 124 ] && echo "[ERROR] The update did not finish in ${RUN_TIMEOUT} s and was stopped." >> "$RUN_LOG"
   if [ "$code" = 0 ]; then
     write_status "done" "$version" "$started" "$(now)" 0
