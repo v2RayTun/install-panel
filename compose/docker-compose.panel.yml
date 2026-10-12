@@ -101,6 +101,8 @@ services:
       BACKUP_LOCAL_PATH: /app/backups
       UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
       UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-https://v2.run/latest.json}
+      XRAY_CORE_MIRROR_URL: ${XRAY_CORE_MIRROR_URL:-}
+      XRAY_CORE_RELEASES_URL: ${XRAY_CORE_RELEASES_URL:-}
     volumes:
       - backups_data:/app/backups
       # The panel's «Обновить» button leaves its request here for the updater on this host.
