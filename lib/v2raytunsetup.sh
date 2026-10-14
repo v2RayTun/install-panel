@@ -410,6 +410,11 @@ ensure_panel_ips() {
     warn "Not IP addresses: ${ips}. The agent port will answer everyone"
     return 0
   fi
+  # The agent port takes IPv4 connections only: a list of IPv6 addresses alone would let the panel in from nowhere.
+  if ! printf '%s' "$ips" | tr ',' '\n' | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'; then
+    warn "No IPv4 address in ${ips}: the agent port takes IPv4 connections only. Give the panel's IPv4 address; the agent port will answer everyone"
+    return 0
+  fi
   # Right after NODE_PORT, as the panel writes it.
   sed -i "s|^\([[:space:]]*\)- NODE_PORT=\([0-9][0-9]*\)[[:space:]]*\$|&\n\1- PANEL_IPS=${ips}|" docker-compose.yml
   if [ "$(compose_panel_ips)" = "$ips" ]; then
@@ -431,6 +436,7 @@ check_agent_port() {
     return 0
   fi
   # The agent sets its rule a few seconds after the container starts; an iptables error is final at once.
+  # The rule is in force only with INPUT jumping to its chain first: a chain alone stops nobody.
   for i in $(seq 1 15); do
     if ! state=$(docker exec "$name" agent-port status 2>&1); then
       if echo "$state" | grep -qiE "not found|no such file"; then
@@ -440,18 +446,18 @@ check_agent_port() {
       fi
       state=""
     fi
-    echo "$state" | grep -Eq "IPv4 kernel rule([^:]*: [1-9][0-9]* line|: )" && break
+    echo "$state" | grep -Eq "IPv4 kernel rule([^:]*: [1-9][0-9]* line\(s\), INPUT jumps to it first|: )" && break
     sleep 2
   done
   if [ -z "${state:-}" ]; then
     warn "The agent did not answer: check «docker logs ${name}». It answers ${ips} only once it runs"
     return 0
   fi
-  if echo "$state" | grep -Eq "IPv4 kernel rule [^:]*: [1-9][0-9]* line"; then
+  if echo "$state" | grep -Eq "IPv4 kernel rule [^:]*: [1-9][0-9]* line\(s\), INPUT jumps to it first"; then
     kernel=1
     success "Agent port ${port}/tcp answers ${ips} only: kernel rule V2RAYTUN-AGENT-${port}, strangers see it filtered"
   else
-    warn "The agent could not set its kernel rule ($(echo "$state" | grep 'IPv4 kernel rule' | head -1)). It still closes every other connection before TLS"
+    warn "The agent's kernel rule is not in force ($(echo "$state" | grep 'IPv4 kernel rule' | head -1)). It still closes every other connection before TLS"
   fi
   ufw_agent_port "$port" "$ips" "$kernel"
 }
