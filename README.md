@@ -41,7 +41,9 @@ In the menu choose **2) Install Node**, then pick the recommended option:
 
 - **Paste docker-compose from the panel** — in the panel UI go to *Nodes → Create Node*, fill in the fields, click *Create*, copy the docker-compose snippet, paste it into the installer. This includes mTLS certificates.
 
-The node should appear as *Connected* in the panel within ~60 seconds. Make sure the connection port (default `62050`) is open in your firewall.
+The node should appear as *Connected* in the panel within ~60 seconds. The agent port (default `2222`) must be reachable from the panel's server.
+
+The agent port answers only the panel's addresses once **System → Panel → Panel IPs for nodes** is set: the panel writes them into the compose (`PANEL_IPS`) and the agent keeps the port to them itself (a kernel rule of its own, so a scanner sees it filtered). When the compose has no `PANEL_IPS`, the installer takes them from `V2RAYTUN_PANEL_IP` (comma-separated) or asks. With ufw active it lets the port through ufw for the agent to decide, or, when the agent cannot set its rule, keeps the port to the panel in ufw, and says what ufw really does. If the panel moves to another address: `docker exec $(docker ps -qf name=v2raytunpanel-node) agent-port open` on the node, and the panel sends its new list itself.
 
 ---
 

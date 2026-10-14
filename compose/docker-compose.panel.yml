@@ -103,6 +103,7 @@ services:
       UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-https://v2.run/latest.json}
       XRAY_CORE_MIRROR_URL: ${XRAY_CORE_MIRROR_URL:-}
       XRAY_CORE_RELEASES_URL: ${XRAY_CORE_RELEASES_URL:-}
+      PANEL_IP_ECHO_URLS: ${PANEL_IP_ECHO_URLS:-}
     volumes:
       - backups_data:/app/backups
       # The panel's «Обновить» button leaves its request here for the updater on this host.

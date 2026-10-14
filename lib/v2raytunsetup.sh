@@ -382,26 +382,135 @@ wait_backend_ready() {
   return 1
 }
 
-# The agent port only has to answer the panel: to anyone else it gives the node away.
-restrict_agent_port() {
-  local port panel_ip="${V2RAYTUN_PANEL_IP:-}"
-  port=$(sed -n 's/.*NODE_PORT=\([0-9][0-9]*\).*/\1/p' docker-compose.yml 2>/dev/null | head -1)
-  [ -n "$port" ] || return 0
-  if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -q "Status: active"; then
-    warn "Allow the agent port ${port}/tcp to the panel's IP only (firewall on this server or at the provider)."
+# The panel's addresses the agent port answers (PANEL_IPS of the compose, comma-separated); empty: everyone.
+compose_panel_ips() {
+  sed -n 's/^[[:space:]]*-[[:space:]]*PANEL_IPS=\(.*\)$/\1/p' docker-compose.yml 2>/dev/null | head -1 | tr -d "[:space:]\"'"
+}
+
+# The agent keeps its port to the panel itself (a kernel rule of its own and a check before TLS),
+# from PANEL_IPS of the compose. The panel writes it there once «IP панели для нод» is set; else it
+# comes from V2RAYTUN_PANEL_IP, or a question when someone is at the terminal.
+ensure_panel_ips() {
+  local ips
+  ips=$(compose_panel_ips)
+  if [ -n "$ips" ]; then
+    info "The agent port will answer the panel only: ${ips}"
     return 0
   fi
-  if [ -z "$panel_ip" ] && [ -t 0 ]; then
-    read -rp "Panel server IP (the agent port ${port} will answer only it; Enter = skip): " panel_ip
+  ips="${V2RAYTUN_PANEL_IP:-}"
+  if [ -z "$ips" ] && [ -t 0 ]; then
+    read -rp "Panel IP(s) the agent port answers, comma-separated (Enter = everyone): " ips
   fi
-  if [ -z "$panel_ip" ]; then
-    warn "ufw is active: allow the agent port to the panel only: ufw allow from <panel IP> to any port ${port} proto tcp && ufw deny ${port}/tcp"
+  ips=$(printf '%s' "$ips" | tr -d '[:space:]')
+  if [ -z "$ips" ]; then
+    warn "The agent port will answer everyone: set «IP панели для нод» in the panel (Система → Панель), it reaches this node too"
     return 0
   fi
-  if ufw allow from "$panel_ip" to any port "$port" proto tcp >/dev/null && ufw deny "$port"/tcp >/dev/null; then
-    success "Agent port ${port}/tcp answers ${panel_ip} only"
+  if ! printf '%s' "$ips" | grep -Eq '^[0-9A-Fa-f:.,/]+$'; then
+    warn "Not IP addresses: ${ips}. The agent port will answer everyone"
+    return 0
+  fi
+  # Right after NODE_PORT, as the panel writes it.
+  sed -i "s|^\([[:space:]]*\)- NODE_PORT=\([0-9][0-9]*\)[[:space:]]*\$|&\n\1- PANEL_IPS=${ips}|" docker-compose.yml
+  if [ "$(compose_panel_ips)" = "$ips" ]; then
+    info "The agent port will answer the panel only: ${ips} (PANEL_IPS added to docker-compose.yml)"
   else
-    warn "Could not add the ufw rules for the agent port ${port}/tcp"
+    warn "Could not add PANEL_IPS to docker-compose.yml: the agent port will answer everyone"
+  fi
+}
+
+# After the start: whom the agent port answers, as the agent itself says, never a guess.
+check_agent_port() {
+  local port ips name state kernel=0 i
+  port=$(sed -n 's/.*NODE_PORT=\([0-9][0-9]*\).*/\1/p' docker-compose.yml 2>/dev/null | head -1)
+  name=$(sed -n 's/^[[:space:]]*container_name:[[:space:]]*\([^[:space:]]*\).*$/\1/p' docker-compose.yml 2>/dev/null | head -1)
+  ips=$(compose_panel_ips)
+  [ -n "$port" ] && [ -n "$name" ] || return 0
+  if [ -z "$ips" ]; then
+    warn "Agent port ${port}/tcp answers everyone: one TLS handshake on it lets a scanner recognise the node. Set «IP панели для нод» in the panel"
+    return 0
+  fi
+  # The agent sets its rule a few seconds after the container starts; an iptables error is final at once.
+  for i in $(seq 1 15); do
+    if ! state=$(docker exec "$name" agent-port status 2>&1); then
+      if echo "$state" | grep -qiE "not found|no such file"; then
+        warn "The agent of this image is older than 1.0.61 and does not keep its port to the panel"
+        ufw_agent_port "$port" "$ips" 0
+        return 0
+      fi
+      state=""
+    fi
+    echo "$state" | grep -Eq "IPv4 kernel rule([^:]*: [1-9][0-9]* line|: )" && break
+    sleep 2
+  done
+  if [ -z "${state:-}" ]; then
+    warn "The agent did not answer: check «docker logs ${name}». It answers ${ips} only once it runs"
+    return 0
+  fi
+  if echo "$state" | grep -Eq "IPv4 kernel rule [^:]*: [1-9][0-9]* line"; then
+    kernel=1
+    success "Agent port ${port}/tcp answers ${ips} only: kernel rule V2RAYTUN-AGENT-${port}, strangers see it filtered"
+  else
+    warn "The agent could not set its kernel rule ($(echo "$state" | grep 'IPv4 kernel rule' | head -1)). It still closes every other connection before TLS"
+  fi
+  ufw_agent_port "$port" "$ips" "$kernel"
+}
+
+# The IPv4 rules of ufw for the port, in the order ufw reads them (the agent listens on IPv4).
+ufw_port_rules() {
+  ufw status numbered 2>/dev/null | grep -E "^\[ *[0-9]+\] +$1(/tcp)? " | grep -v "(v6)" || true
+}
+
+# Whether the rules do what they must, read top down as ufw does: with the agent's kernel rule,
+# everyone gets through to the agent (it keeps the port to the panel); without it, every IPv4
+# address of the panel is let in before anyone is denied, and nobody else is let in before that.
+ufw_port_ok() {
+  local rules="$1" ips="$2" kernel="$3" line action from ip allowed=" "
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    action=$(echo "$line" | grep -oE "(ALLOW|DENY|REJECT|LIMIT) IN" | head -1)
+    from=$(echo "$line" | awk '{print $NF}')
+    if [ "$from" = "Anywhere" ]; then
+      if [ "$kernel" = 1 ]; then [ "$action" = "ALLOW IN" ]; return; fi
+      [ "$action" = "DENY IN" ] || [ "$action" = "REJECT IN" ] || return 1
+      for ip in $(echo "$ips" | tr ',' ' '); do
+        case "$ip" in *:*) continue ;; esac
+        case "$allowed" in *" $ip "*) ;; *) return 1 ;; esac
+      done
+      return 0
+    fi
+    [ "$action" = "ALLOW IN" ] && allowed="${allowed}${from} "
+  done <<< "$rules"
+  return 1
+}
+
+# With ufw on, the panel must get through it. When the agent keeps the port to the panel by its own
+# kernel rule, ufw just lets the port through: a fixed ufw list would not follow «IP панели для нод»
+# (an address added there, the panel moving). Without that rule, ufw keeps the port to the panel:
+# the deny first, then each allow put above it (prepend). A rule for the same port and protocol
+# already there is changed in place instead (ufw neither prepends nor duplicates it), so nothing an
+# earlier run or the admin left can stand between, and success is said only once ufw shows it.
+ufw_agent_port() {
+  local port="$1" ips="$2" kernel="$3" ip rules
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw status 2>/dev/null | grep -q "Status: active" || return 0
+  if [ "$kernel" = 1 ]; then
+    ufw prepend allow proto tcp from any to any port "$port" >/dev/null 2>&1 || true
+    ufw_port_rules "$port" | grep -q "ALLOW IN *Anywhere" || ufw allow proto tcp from any to any port "$port" >/dev/null 2>&1 || true
+  else
+    ufw prepend deny proto tcp from any to any port "$port" >/dev/null 2>&1 || true
+    ufw_port_rules "$port" | grep -q "DENY IN *Anywhere" || ufw deny proto tcp from any to any port "$port" >/dev/null 2>&1 || true
+    for ip in $(echo "$ips" | tr ',' ' '); do
+      ufw prepend allow proto tcp from "$ip" to any port "$port" >/dev/null 2>&1 ||
+        ufw insert 1 allow proto tcp from "$ip" to any port "$port" >/dev/null 2>&1 || true
+    done
+  fi
+  rules=$(ufw_port_rules "$port")
+  if ufw_port_ok "$rules" "$ips" "$kernel"; then
+    if [ "$kernel" = 1 ]; then success "ufw lets port ${port}/tcp through; the agent keeps it to the panel"; else success "ufw keeps port ${port}/tcp to ${ips}"; fi
+  else
+    warn "ufw rules for port ${port}/tcp do not do what they must, check «ufw status numbered»:"
+    echo "$rules"
   fi
 }
 
@@ -988,6 +1097,8 @@ node_install_from_panel() {
     info "Enabled net.ipv4.ip_forward"
   fi
 
+  ensure_panel_ips
+
   info "Pulling node image..."
   docker compose pull
 
@@ -996,7 +1107,7 @@ node_install_from_panel() {
 
   if [ $? -eq 0 ]; then
     success "Node started. It should appear as Connected in the panel within ~60 seconds."
-    restrict_agent_port
+    check_agent_port
     echo ""
     echo -e "  Logs: ${YELLOW}cd $NODE_DIR && docker compose logs -f${RESET}"
   else
@@ -1103,6 +1214,10 @@ node_remove() {
     info "Cancelled"
     return 0
   fi
+  # The agent's own rule for its port goes with it (it takes it away when it stops, this makes sure).
+  local name
+  name=$(sed -n 's/^[[:space:]]*container_name:[[:space:]]*\([^[:space:]]*\).*$/\1/p' "$NODE_DIR/docker-compose.yml" 2>/dev/null | head -1)
+  [ -n "$name" ] && docker exec "$name" agent-port open >/dev/null 2>&1 || true
   (cd "$NODE_DIR" && docker compose down -v --remove-orphans) || true
   rm -rf "$NODE_DIR"
   success "Node removed"
@@ -1657,7 +1772,8 @@ Commands:
 Environment:
   V2RAYTUN_REGISTRY        Docker registry hostname
   V2RAYTUN_VERSION         Image tag (default ${VERSION})
-  V2RAYTUN_PANEL_IP        Node install: the panel's IP, the only one the agent port answers (when ufw is active)
+  V2RAYTUN_PANEL_IP        Node install: the panel's IP(s), comma-separated, the only ones the agent port answers
+                           (PANEL_IPS), when the panel's compose has none («IP панели для нод» not set)
 
 Updating from the panel:
   Install and «Update Panel» set up a host updater (systemd: ${UPDATER_UNIT}.path and .service).

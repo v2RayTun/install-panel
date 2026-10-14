@@ -16,6 +16,8 @@ services:
       CONNECTION_PORT: ${CONNECTION_PORT:-62050}
       SERVICE_PORT: ${SERVICE_PORT:-62051}
       NODE_PORT: ${CONNECTION_PORT:-62050}
+      # The panel's addresses (comma-separated, CIDR too): the agent port answers only them. Empty: everyone.
+      PANEL_IPS: ${PANEL_IPS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       XRAY_STREAM_LOGS_TO_STDOUT: ${XRAY_STREAM_LOGS_TO_STDOUT:-true}
     volumes:
