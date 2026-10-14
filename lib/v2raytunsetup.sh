@@ -253,6 +253,51 @@ EOF
 # ──────────────────────────────────────────────────────────────────────────────
 # Panel: update
 # ──────────────────────────────────────────────────────────────────────────────
+# Whether release X.Y.Z $1 is newer than $2, part by part as numbers.
+release_newer() {
+  local IFS=. i
+  local -a a b
+  read -r -a a <<< "$1"
+  read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    ((10#${a[i]:-0} > 10#${b[i]:-0})) && return 0
+    ((10#${a[i]:-0} < 10#${b[i]:-0})) && return 1
+  done
+  return 1
+}
+
+# «Update Panel/Node» from this server's menu: the installer kept here was fetched for one release
+# and would install that release again. When its source (RAW_BASE) has a newer one, that installer
+# runs the update instead, so it goes to the latest release and brings its compose templates and
+# fixes. A version given to this run (the panel's «Обновить» button, the one-liner) is kept as it is.
+# Returns 10 when it ran nothing and the update goes on here.
+run_latest_installer() {
+  local action="$1" tmp latest rest code=0
+  [ -z "$_requested_version" ] || return 10
+  [ -n "${RAW_BASE:-}" ] || return 10
+  tmp=$(mktemp -d) || return 10
+  if ! curl -fsSL --max-time 20 "$RAW_BASE/install.sh" -o "$tmp/install.sh" 2>/dev/null || ! bash -n "$tmp/install.sh" 2>/dev/null; then
+    warn "Could not check ${RAW_BASE} for a newer release: updating to ${VERSION}"
+    rm -rf "$tmp"
+    return 10
+  fi
+  latest=$(sed -n 's/^DEFAULT_VERSION="\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$tmp/install.sh" | head -n 1)
+  if [ -z "$latest" ] || ! release_newer "$latest" "$VERSION"; then
+    rm -rf "$tmp"
+    return 10
+  fi
+  info "Release ${latest} is out (this installer was fetched for ${VERSION}): updating with its installer..."
+  rest="${RAW_BASE#https://raw.githubusercontent.com/}"
+  if [ "$rest" != "$RAW_BASE" ] && [ "${rest%/*}" != "$rest" ]; then
+    V2RAYTUN_ACTION="$action" V2RAYTUN_VERSION="$latest" V2RAYTUNSETUP_REPO="${rest%/*}" V2RAYTUNSETUP_BRANCH="${rest##*/}" \
+      bash "$tmp/install.sh" --no-tmux || code=$?
+  else
+    V2RAYTUN_ACTION="$action" V2RAYTUN_VERSION="$latest" bash "$tmp/install.sh" --no-tmux || code=$?
+  fi
+  rm -rf "$tmp"
+  return "$code"
+}
+
 panel_update() {
   print_banner
   echo -e "${BOLD_MAGENTA}  Update Panel${RESET}"
@@ -263,6 +308,10 @@ panel_update() {
     error "Panel not installed at ${PANEL_DOCKER_DIR}"
     return 1
   fi
+  local latest_rc=0
+  run_latest_installer update-panel || latest_rc=$?
+  # The newer installer did the update (and showed its own menu): this one only ends.
+  [ "$latest_rc" = 10 ] || exit "$latest_rc"
   check_docker
 
   cd "$PANEL_DOCKER_DIR"
@@ -1186,6 +1235,9 @@ node_update() {
     error "Node not installed at ${NODE_DIR}"
     return 1
   fi
+  local latest_rc=0
+  run_latest_installer update-node || latest_rc=$?
+  [ "$latest_rc" = 10 ] || exit "$latest_rc"
   check_docker
 
   cd "$NODE_DIR"
