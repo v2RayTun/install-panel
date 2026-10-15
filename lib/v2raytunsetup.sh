@@ -20,8 +20,8 @@ _requested_version="${V2RAYTUN_VERSION:-}"
 [ -n "$_requested_version" ] && V2RAYTUN_VERSION="$_requested_version"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
-VERSION="${V2RAYTUN_VERSION:-1.0.61}"
-INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.61}"
+VERSION="${V2RAYTUN_VERSION:-1.0.62}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.62}"
 
 PANEL_DIR="/opt/v2raytunpanel"
 PANEL_DOCKER_DIR="$PANEL_DIR/docker"
